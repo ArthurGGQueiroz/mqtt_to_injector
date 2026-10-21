@@ -23,7 +23,8 @@ O fluxo de dados ocorre da seguinte forma:
 ├── main.py                    # Script Python (Consome MQTT e grava no RDS)
 └── mosquitto
     └── config
-        └── mosquitto.conf     # Configurações do Broker MQTT```
+        └── mosquitto.conf     # Configurações do Broker MQTT
+```
 
 ## :wrench: Pré requisitos
 
@@ -38,4 +39,5 @@ CREATE TABLE leituras (
     valor FLOAT,
     topico VARCHAR(100),
     criado_em TIMESTAMP DEFAULT NOW()
-);```
+);
+```
