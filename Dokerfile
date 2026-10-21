@@ -1,0 +1,15 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Instala dependências do sistema necessárias para compilar o psycopg2 se preciso
+RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+# Instala as bibliotecas Python
+RUN pip install --no-cache-dir paho-mqtt psycopg2-binary
+
+# Copia o código para dentro do container
+COPY main.py .
+
+# Executa o script
+CMD ["python", "main.py"]
