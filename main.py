@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import logging
 import paho.mqtt.client as mqtt
 import psycopg2
@@ -11,6 +12,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 MQTT_HOST = os.getenv("MQTT_BROKER_HOST", "mosquitto")
 MQTT_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "sensores/#")
+MQTT_USER = os.getenv("MQTT_USER")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT", "5432")
@@ -34,12 +37,12 @@ def get_db_connection():
         return None
 
 # Callback executado quando o MQTT conecta ao broker
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code, properties):
+    if not reason_code.is_failure:
         logging.info("Conectado ao Broker MQTT com sucesso!")
         client.subscribe(MQTT_TOPIC)
     else:
-        logging.error(f"Falha na conexão MQTT, código de retorno: {rc}")
+        logging.error(f"Falha na conexão MQTT: {reason_code}")
 
 # Callback executado quando uma nova mensagem chega de um sensor
 def on_message(client, userdata, msg):
@@ -74,12 +77,20 @@ def on_message(client, userdata, msg):
         logging.error(f"Erro ao processar/inserir a mensagem: {e}")
 
 # Inicialização do Cliente MQTT
-client = mqtt.Client()
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
 client.on_connect = on_connect
 client.on_message = on_message
 
 if __name__ == "__main__":
     logging.info("Iniciando o Injetor MQTT...")
-    client.connect(MQTT_HOST, MQTT_PORT, 60)
+    # O broker pode ainda não estar pronto quando o container sobe
+    while True:
+        try:
+            client.connect(MQTT_HOST, MQTT_PORT, 60)
+            break
+        except OSError as e:
+            logging.warning(f"Broker MQTT indisponível ({e}), tentando novamente em 5s...")
+            time.sleep(5)
     # Loop contínuo para escutar as mensagens indefinidamente
     client.loop_forever()

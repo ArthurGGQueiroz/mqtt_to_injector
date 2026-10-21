@@ -1,9 +1,7 @@
-version: '3.8'
-
 services:
   # 1. Broker MQTT rodando na EC2
   mosquitto:
-    image: eclipse-mosquitto:latest
+    image: eclipse-mosquitto:2
     container_name: mqtt_broker
     restart: unless-stopped
     ports:
@@ -21,14 +19,12 @@ services:
     restart: unless-stopped
     depends_on:
       - mosquitto
+    # Credenciais do MQTT e do RDS ficam no .env (veja .env.example)
+    env_file:
+      - .env
     environment:
       - MQTT_BROKER_HOST=mosquitto
       - MQTT_BROKER_PORT=1883
-      - DB_HOST=
-      - DB_PORT=5432
-      - DB_USER=
-      - DB_PASSWORD=
-      - DB_NAME=
     networks:
       - iot-net
 

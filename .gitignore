@@ -1,0 +1,9 @@
+# Credenciais
+.env
+mosquitto/config/passwd
+
+# Dados persistidos pelo Mosquitto
+mosquitto/data/
+
+# Python
+__pycache__/
