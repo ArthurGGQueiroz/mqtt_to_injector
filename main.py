@@ -47,30 +47,79 @@ def on_connect(client, userdata, flags, reason_code, properties):
 # Callback executado quando uma nova mensagem chega de um sensor
 def on_message(client, userdata, msg):
     try:
+        # Extração do ID a partir do tópico MQTT (ex: japungu/telemetria/3211)
+        topico_partes = msg.topic.split('/')
+        id = int(topico_partes[-1])
+        
         payload_str = msg.payload.decode('utf-8')
-        logging.info(f"Mensagem recebida no tópico [{msg.topic}]: {payload_str}")
+        logging.info(f"Mensagem recebida no tópico [{msg.topic}] (ID: {id_operacao}): {payload_str}")
         
         data = json.loads(payload_str)
         
-        # Exemplo de extração dos dados (ajuste conforme o payload do seu sensor)
-        sensor_id = data.get("sensor_id")
-        valor = data.get("valor")
-        timestamp = data.get("timestamp") # Ou use o horário atual do servidor
-
-        # Inserção no RDS
+        # Extração dos dados do payload
+        id_operacao = data.get("id_operacao")
+        paf = data.get("paf")
+        pdf = data.get("pdf")
+        pav = data.get("pav")
+        pdv = data.get("pdv")
+        vazao = data.get("vazao")
+        horimetro = data.get("horimetro")
+        
+        # Comandos elétricos (ce_1 a ce_9)[cite: 1]
+        ce_1 = data.get("ce_1")
+        ce_2 = data.get("ce_2")
+        ce_3 = data.get("ce_3")
+        ce_4 = data.get("ce_4")
+        ce_5 = data.get("ce_5")
+        ce_6 = data.get("ce_6")
+        ce_7 = data.get("ce_7")
+        ce_8 = data.get("ce_8")
+        ce_9 = data.get("ce_9")
+        
+        # Comandos hidráulicos (ch_1 a ch_9)[cite: 1]
+        ch_1 = data.get("ch_1")
+        ch_2 = data.get("ch_2")
+        ch_3 = data.get("ch_3")
+        ch_4 = data.get("ch_4")
+        ch_5 = data.get("ch_5")
+        ch_6 = data.get("ch_6")
+        ch_7 = data.get("ch_7")
+        ch_8 = data.get("ch_8")
+        ch_9 = data.get("ch_9")
+        
+        # Inserção no RDS (utilizando NOW() para data_hora)
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            # Certifique-se de que a tabela 'leituras' existe no seu RDS
-            cursor.execute(
-                "INSERT INTO leituras (sensor_id, valor, topico, criado_em) VALUES (%s, %s, %s, NOW())",
-                (sensor_id, valor, msg.topic)
-            )
+            
+            sql = """
+                INSERT INTO telemetria (
+                    id, id_operacao, data_hora, paf, pdf, pav, pdv, vazao, horimetro,
+                    ce_1, ce_2, ce_3, ce_4, ce_5, ce_6, ce_7, ce_8, ce_9,
+                    ch_1, ch_2, ch_3, ch_4, ch_5, ch_6, ch_7, ch_8, ch_9,
+                    calibracao_sensor, leitura_campo
+                ) VALUES (
+                    %s, %s, NOW(), %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s
+                )
+            """
+            
+            cursor.execute(sql, (
+                id, id_operacao, paf, pdf, pav, pdv, vazao, horimetro,
+                ce_1, ce_2, ce_3, ce_4, ce_5, ce_6, ce_7, ce_8, ce_9,
+                ch_1, ch_2, ch_3, ch_4, ch_5, ch_6, ch_7, ch_8, ch_9,
+                calibracao_sensor, leitura_campo
+            ))
+            
             conn.commit()
             cursor.close()
             conn.close()
-            logging.info("Dado inserido no RDS com sucesso!")
+            logging.info("Dados de telemetria inseridos no RDS com sucesso!")
             
+    except (ValueError, IndexError):
+        logging.error(f"Erro ao extrair o ID do tópico MQTT: {msg.topic}")
     except json.JSONDecodeError:
         logging.error("O payload recebido não é um JSON válido.")
     except Exception as e:
