@@ -6,7 +6,8 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # Instala as bibliotecas Python (psycopg2-binary já inclui o libpq, sem precisar de gcc)
-RUN pip install --no-cache-dir "paho-mqtt>=2,<3" "psycopg2-binary>=2.9,<3"
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o código para dentro do container
 COPY main.py .

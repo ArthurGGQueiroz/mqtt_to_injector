@@ -11,6 +11,11 @@ services:
       - ./mosquitto/data:/mosquitto/data
     networks:
       - iot-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # 2. Injetor (consome o MQTT local da EC2 e grava no RDS)
   injector:
@@ -27,6 +32,11 @@ services:
       - MQTT_BROKER_PORT=1883
     networks:
       - iot-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   iot-net:
