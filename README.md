@@ -57,9 +57,9 @@ Um `id_operacao` enviado no payload é **ignorado**: a operação é resolvida p
 ## :wrench: Pré requisitos
 
 - Instância AWS EC2 **t4g.micro (arm64) com Amazon Linux 2023**, na mesma VPC do RDS, com um **Elastic IP** associado (os sensores apontam para um IP fixo).
-  - Instância: `i-009d73194da9fca44` (t4g.micro, us-east-1b)
-  - Elastic IP: `184.198.228.141`
-- RDS PostgreSQL `irrigacao-db` (`irrigacao-db.cm7e0cu4c50w.us-east-1.rds.amazonaws.com`), banco `irrigacao_db`.
+  - Instância: `<INSTANCE_ID>` (t4g.micro, us-east-1b)
+  - Elastic IP: `<ELASTIC_IP>`
+- RDS PostgreSQL `irrigacao-db` (`<ENDPOINT_RDS>`), banco `irrigacao_db`.
 - As tabelas `telemetria`, `operacao` e `maquina` **já existem** no `irrigacao_db`: não há `CREATE TABLE` a rodar.
 - Role do banco `mqtt_injector`, criada pelo script [`sql/criar_role_mqtt_injector.sql`](sql/criar_role_mqtt_injector.sql) (executado uma vez por um administrador do banco).
 
@@ -67,20 +67,20 @@ Um `id_operacao` enviado no payload é **ignorado**: a operação é resolvida p
 
 ### 1. Configure os Security Groups
 
-A EC2 usa o Security Group `mqtt-injector-sg` (`sg-085d2565028a8ff72`), e o SG do RDS (`sg-0ed58d7d176f22bf1`) libera a porta `5432` a partir dele:
+A EC2 usa o Security Group `mqtt-injector-sg` (`<SG_EC2>`), e o SG do RDS (`<SG_RDS>`) libera a porta `5432` a partir dele:
 
 | Security Group | Regra de entrada | Origem |
 |---|---|---|
 | `mqtt-injector-sg` (EC2) | SSH (`22`) | Seu IP |
 | `mqtt-injector-sg` (EC2) | TCP `1883` (MQTT) | IPs dos sensores |
-| `sg-0ed58d7d176f22bf1` (RDS) | PostgreSQL (`5432`) | `mqtt-injector-sg` |
+| `<SG_RDS>` (RDS) | PostgreSQL (`5432`) | `mqtt-injector-sg` |
 
 > :warning: A porta `1883` trafega sem criptografia. Evite liberá-la para `0.0.0.0/0`.
 
 ### 2. Acesse a EC2 e instale Docker, Docker Compose e Git
 
 ```
-ssh -i rigtech_key.pem ec2-user@184.198.228.141
+ssh -i <sua-chave>.pem ec2-user@<ELASTIC_IP>
 ```
 
 **Amazon Linux 2023** (a instância é arm64; o `uname -m` abaixo já baixa o binário `aarch64`):
@@ -141,7 +141,7 @@ A tabela `telemetria` já existe, então não há nada a criar. Para testar a co
 
 ```
 docker run --rm -it postgres:16 psql \
-  "host=irrigacao-db.cm7e0cu4c50w.us-east-1.rds.amazonaws.com dbname=irrigacao_db user=mqtt_injector sslmode=require" \
+  "host=<ENDPOINT_RDS> dbname=irrigacao_db user=mqtt_injector sslmode=require" \
   -c "SELECT id, id_maquina, inicio, fim FROM operacao WHERE fim IS NULL;"
 ```
 
@@ -186,7 +186,7 @@ Deve aparecer `Mensagem recebida no tópico [teste/telemetria/2] (máquina: 2)` 
 ### Problemas comuns
 
 - **`Falha na conexão MQTT: Not authorized`**: o `MQTT_USER`/`MQTT_PASSWORD` do `.env` não bate com o `passwd`.
-- **`Erro ao conectar no RDS: ... timeout`**: o SG do RDS (`sg-0ed58d7d176f22bf1`) não libera a porta `5432` para o `mqtt-injector-sg`, ou o `DB_HOST` está errado.
+- **`Erro ao conectar no RDS: ... timeout`**: o SG do RDS (`<SG_RDS>`) não libera a porta `5432` para o `mqtt-injector-sg`, ou o `DB_HOST` está errado.
 - **`Erro ao conectar no RDS: ... password authentication failed`**: o `DB_PASSWORD` não é a senha da role `mqtt_injector`.
 - **`Nenhuma operação aberta para a máquina N: leitura foi descartada...`**: não existe em `operacao` uma linha com `id_maquina = N` aberta no instante da leitura (`fim` nulo ou posterior ao `timestamp`). Abra a operação no sistema e confira se o último segmento do tópico é o `maquina.id` correto e se o `timestamp` do payload está certo.
 - **`permission denied for table ...`**: a role `mqtt_injector` está sem permissão; rode novamente `sql/criar_role_mqtt_injector.sql`.
