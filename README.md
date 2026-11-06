@@ -16,24 +16,40 @@ O fluxo de dados ocorre da seguinte forma:
 
 ## :satellite: Fluxo da telemetria
 
-**Tópico:** `<ecode>/telemetria/<maquina.id>` (o injetor assina `+/telemetria/+`). O último segmento é o `id` da tabela `maquina`; o `ecode` não é usado.
+**Tópico:** `<ecode>/telemetria/<maquina.id>` (o injetor assina `+/telemetria/+`). O último segmento é o `id` da tabela `maquina`; o `ecode` não é usado. O tópico é só o **plano B**: a máquina é identificada de preferência pelo `dev_id` do payload (veja abaixo). Exemplo: o tópico `teste/telemetria/2` é o equipamento vinculado à máquina Gotejo_69 (`dev_id` 215876883829000).
 
-**Payload (JSON)**, veja [exemplo_payload.json](exemplo_payload.json):
+**Payload (JSON)**, veja [exemplo_payload.json](exemplo_payload.json) (capturado do firmware real):
 
 | Campo | Tipo | Observação |
 |---|---|---|
-| `timestamp` | inteiro (ms desde epoch) | Hora da leitura. Ausente ou anterior a 2020 (relógio ainda não sincronizado) → usa `NOW()` |
+| `dev_id` | inteiro | Id do chip. Resolve a máquina por `maquina.dev_id`; se ausente ou não cadastrado, usa o `id` do tópico (e loga `WARNING` se havia `dev_id`) |
+| `timestamp` | inteiro (ms desde epoch) | Hora da leitura. Ausente ou anterior a 2020 (relógio ainda não sincronizado) → usa o horário do servidor, com `WARNING` |
+| `id_operacao` | inteiro | Código da **atividade** (produtiva) = `tipo_operacao.codigo_cadastro_servidor` (não é o id da tabela `operacao`) |
+| `id_parada` | inteiro | Código da **parada** (improdutiva) = `tipo_operacao.codigo_cadastro_servidor`. Se não for `null`, vale no lugar de `id_operacao` |
+| `operador` | inteiro | `operador.codigo_cadastro_servidor` (nunca `operador.codigo`) |
 | `paf`, `pdf`, `pav`, `pdv`, `vazao`, `horimetro` | número | Sensor ausente é gravado como `NULL` (nunca `0`) |
 | `ce_1` … `ce_9` | booleano | Comandos elétricos |
 | `ch_1` … `ch_9` | booleano | Comandos hidráulicos |
 | `calibracao_sensor` | objeto/lista (opcional) | Gravado como `jsonb`; qualquer outro valor vira `NULL` |
 | `leitura_campo` | booleano (opcional) | Ausente → `false` |
 
-Um `id_operacao` enviado no payload é **ignorado**: a operação é resolvida pelo próprio injetor.
+Os demais campos do firmware (`msg_num`, `estado`, `evento`, `evento_codigo`, `eq_id`, `hidrometro`, `sinal`, `apontamento_manual`, `lat`, `lon`, `bateria`, `fonte_externa`, `falhas`, `cal_versao`, `fw`) ainda **não são gravados**.
 
-**Resolução da operação:** para cada mensagem o injetor busca na tabela `operacao` a operação da máquina que estava aberta no instante da leitura (`inicio <= data_hora` e `fim IS NULL` ou `fim >= data_hora`), escolhendo a de `inicio` mais recente. A leitura é inserida em `telemetria` com esse `id_operacao` (o `id` da telemetria é gerado pelo banco).
+**Troca de operação:** o injetor mantém a operação aberta da máquina de acordo com o `(tipo, operador)` de cada leitura, numa única transação com o INSERT da telemetria:
 
-> :warning: Se a máquina **não tiver operação aberta** naquele instante, a leitura é **descartada** (não é gravada) e aparece um `WARNING` no log.
+1. A máquina é resolvida por `dev_id` (ou pelo tópico); `id_parada`/`id_operacao` viram `tipo_operacao.id` e `operador` vira `operador.id`, sempre por `codigo_cadastro_servidor`. Código ausente ou desconhecido vira `NULL` (o desconhecido gera `WARNING`; ex.: operador `1001` do CSV de exemplo não existe no cadastro e **não** cai em `operador.codigo`). O cadastro fica em cache de memória por 5 minutos, inclusive os desconhecidos.
+2. Há operação aberta (`fim IS NULL`) e o instante `ts` da leitura é menor que o `inicio` dela → leitura atrasada/reenviada do SD: **não troca** a operação; usa a operação vigente em `ts` (`inicio <= ts` e `fim IS NULL` ou `fim >= ts`) e, se não houver, descarta.
+3. Há operação aberta, `ts >= inicio` e o `(tipo, operador)` é o mesmo → mantém.
+4. Há operação aberta, `ts >= inicio` e o `(tipo, operador)` mudou → fecha a atual (`fim = ts`) e abre outra (`inicio = ts`), com `INFO` de troca no log (códigos de origem incluídos).
+5. Não há operação aberta: se `ts` é maior ou igual ao maior `fim` da máquina (ou ela não tem operação), abre uma nova em `ts`; se for anterior (leitura antiga), usa a operação vigente em `ts` ou descarta.
+
+Código recém-cadastrado em `tipo_operacao` ou `operador` leva até 5 minutos (TTL do cache) para valer. Se o payload alternar entre `null` e um valor em tipo ou operador, cada alternância troca a operação; acompanhe com `grep "Troca de operação"` no primeiro dia.
+
+A leitura é inserida em `telemetria` com o `id` da operação resolvida ou criada (o `id` da telemetria é gerado pelo banco). Se duas mensagens tentarem abrir operação ao mesmo tempo (índice único `uq_operacao_aberta_por_maquina`), a transação é desfeita e repetida uma vez.
+
+> :warning: Leituras antigas (anteriores ao `inicio` da operação aberta ou ao `fim` da última) para as quais **não existe operação vigente** no instante são **descartadas** (não são gravadas) e aparece um `WARNING` no log.
+
+> :warning: **Dependências no `RigTech_APIs`:** a migration **006** (`codigo_cadastro_servidor` em `tipo_operacao` e `operador`) e a **007** (`maquina.dev_id`) precisam estar aplicadas, e a role precisa dos novos grants de `sql/criar_role_mqtt_injector.sql`. Sem a 007 o injetor loga ERROR e volta à regra antiga (máquina do tópico, sem troca de operação) até ser reiniciado.
 
 ---
 
@@ -45,6 +61,9 @@ Um `id_operacao` enviado no payload é **ignorado**: a operação é resolvida p
 ├── Dockerfile                 # Configuração da imagem Python do injetor
 ├── requirements.txt           # Dependências Python do injetor
 ├── main.py                    # Script Python (Consome MQTT e grava no RDS)
+├── sincronizar_operacao.py    # Resolve máquina, tipo, operador e troca de operação (sem paho)
+├── tests
+│   └── test_sincronizar_operacao.py  # Testes com cursor falso (python tests/test_sincronizar_operacao.py)
 ├── exemplo_payload.json       # Payload de exemplo para testes
 ├── .env.example               # Modelo das variáveis de ambiente (copie para .env)
 ├── sql
@@ -60,7 +79,7 @@ Um `id_operacao` enviado no payload é **ignorado**: a operação é resolvida p
   - Instância: `<INSTANCE_ID>` (t4g.micro, us-east-1b)
   - Elastic IP: `<ELASTIC_IP>`
 - RDS PostgreSQL `irrigacao-db` (`<ENDPOINT_RDS>`), banco `irrigacao_db`.
-- As tabelas `telemetria`, `operacao` e `maquina` **já existem** no `irrigacao_db`: não há `CREATE TABLE` a rodar.
+- As tabelas `telemetria`, `operacao`, `maquina`, `tipo_operacao` e `operador` **já existem** no `irrigacao_db`: não há `CREATE TABLE` a rodar. As migrations 006 e 007 do `RigTech_APIs` (`codigo_cadastro_servidor` e `maquina.dev_id`) precisam estar aplicadas.
 - Role do banco `mqtt_injector`, criada pelo script [`sql/criar_role_mqtt_injector.sql`](sql/criar_role_mqtt_injector.sql) (executado uma vez por um administrador do banco).
 
 ## :rocket: Passo a passo para rodar na EC2
@@ -145,7 +164,7 @@ docker run --rm -it postgres:16 psql \
   -c "SELECT id, id_maquina, inicio, fim FROM operacao WHERE fim IS NULL;"
 ```
 
-A consulta também mostra quais máquinas têm operação aberta (só elas terão leituras gravadas).
+A consulta mostra quais máquinas têm operação aberta. O injetor abre e fecha operações sozinho conforme o tipo e o operador do payload, então não é preciso abrir a operação antes.
 
 ### 7. Suba os containers
 
@@ -158,13 +177,13 @@ Os dois containers (`mqtt_broker` e `mqtt_injector`) devem aparecer como `runnin
 
 ### 8. Teste o fluxo
 
-Publique o payload de exemplo para a máquina `2` (troque pelo `id` de uma máquina com operação aberta), de qualquer computador com o `mosquitto_pub` instalado:
+Publique o payload de exemplo (a máquina vem do `dev_id`; o tópico `teste/telemetria/2` é o equipamento vinculado à Gotejo_69), de qualquer computador com o `mosquitto_pub` instalado. **Atenção:** isso grava no banco e pode abrir/trocar a operação da máquina:
 
 ```
 mosquitto_pub -h <host> -u <user> -P <senha> -t teste/telemetria/2 -f exemplo_payload.json
 ```
 
-> O `exemplo_payload.json` traz um `timestamp` fixo, e a operação precisa estar aberta nesse instante. Para usar a hora de chegada, remova o campo `timestamp`.
+> O `exemplo_payload.json` traz um `timestamp` fixo: se a máquina já tiver operação posterior a esse instante, a leitura é tratada como atrasada. Para usar a hora de chegada, remova o campo `timestamp`.
 
 E acompanhe os logs do injetor:
 
@@ -172,7 +191,7 @@ E acompanhe os logs do injetor:
 docker compose logs -f injector
 ```
 
-Deve aparecer `Mensagem recebida no tópico [teste/telemetria/2] (máquina: 2)` seguido de `Dados de telemetria inseridos no RDS com sucesso! (máquina: 2, operação: <id>)`.
+Deve aparecer `Mensagem recebida no tópico [teste/telemetria/2] (máquina do tópico: 2)` seguido de `Dados de telemetria inseridos no RDS com sucesso! (máquina: <id> via dev_id, operação: <id>)`.
 
 ### Comandos úteis
 
@@ -188,7 +207,10 @@ Deve aparecer `Mensagem recebida no tópico [teste/telemetria/2] (máquina: 2)` 
 - **`Falha na conexão MQTT: Not authorized`**: o `MQTT_USER`/`MQTT_PASSWORD` do `.env` não bate com o `passwd`.
 - **`Erro ao conectar no RDS: ... timeout`**: o SG do RDS (`<SG_RDS>`) não libera a porta `5432` para o `mqtt-injector-sg`, ou o `DB_HOST` está errado.
 - **`Erro ao conectar no RDS: ... password authentication failed`**: o `DB_PASSWORD` não é a senha da role `mqtt_injector`.
-- **`Nenhuma operação aberta para a máquina N: leitura foi descartada...`**: não existe em `operacao` uma linha com `id_maquina = N` aberta no instante da leitura (`fim` nulo ou posterior ao `timestamp`). Abra a operação no sistema e confira se o último segmento do tópico é o `maquina.id` correto e se o `timestamp` do payload está certo.
-- **`permission denied for table ...`**: a role `mqtt_injector` está sem permissão; rode novamente `sql/criar_role_mqtt_injector.sql`.
+- **`Nenhuma operação para a máquina N ... leitura foi descartada...`**: leitura antiga (anterior ao `inicio` da operação aberta ou ao `fim` da última) sem nenhuma operação vigente naquele instante. Confira o `timestamp` do payload e a máquina resolvida (`via dev_id` ou `via tópico`).
+- **`dev_id ... não está cadastrado em maquina.dev_id`**: o chip não está vinculado a nenhuma máquina; a leitura foi para a máquina do tópico. Cadastre o `dev_id` (migration 007).
+- **`operador: código ... não existe em codigo_cadastro_servidor`** (ou `tipo_operacao`): o código do payload não está no cadastro do servidor; a operação é gravada sem operador/tipo (aparece como parada).
+- **`column "dev_id" does not exist`** ou **`column "codigo_cadastro_servidor" does not exist`**: faltam as migrations 007 / 006 do `RigTech_APIs`.
+- **`permission denied for table ...`**: a role `mqtt_injector` está sem permissão; aplique a migration 007 do RigTech_APIs (ou o script de role, com a **mesma** senha do `.env`).
 - **`Erro ao extrair o ID do tópico MQTT`**: o último segmento do tópico não é um número (`maquina.id`).
 - **`mqtt_broker` reiniciando sem parar**: falta o arquivo `mosquitto/config/passwd` (passo 4). Veja com `docker compose logs mosquitto`.

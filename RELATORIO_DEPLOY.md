@@ -81,6 +81,22 @@ Software na EC2: Docker 25.0.14 e Docker Compose v2.29.7. Código em `/home/ec2-
   - `teste/telemetria/2` → `Dados de telemetria inseridos no RDS com sucesso! (máquina: 2, operação: 2)`. Linha conferida no banco e depois removida.
   - `teste/telemetria/999` → `Nenhuma operação aberta para a máquina 999: leitura foi descartada`.
 
+### 2.6 Atualização: máquina por `dev_id` e troca de operação (ainda não implantada)
+
+A versão descrita nas seções 2.1 a 2.5 (commit `9fdbfce`) só **lia** a operação aberta, e o payload do firmware real não era usado. A atualização seguinte (`sincronizar_operacao.py` + `main.py`):
+
+- identifica a máquina pelo `dev_id` do payload (`maquina.dev_id`), com o id do tópico como plano B;
+- traduz `id_parada` (prioridade) / `id_operacao` e `operador` por `codigo_cadastro_servidor` (nunca por `codigo`);
+- abre e fecha `operacao` quando o (tipo, operador) muda, na mesma transação do INSERT da telemetria;
+- não troca a operação em leitura atrasada (reenvio do SD).
+
+A afirmação da seção 3.3 da versão anterior, de que a abertura e o fechamento de operações são feitos pela API/operador, deixou de valer.
+
+Para implantar:
+1. Aplicar as migrations **006** (`codigo_cadastro_servidor`) e **007** (`maquina.dev_id`, com o chip 215876883829000 na Gotejo_69) do `RigTech_APIs`.
+2. Nada a rodar para a role: a própria 007 concede os grants novos (`SELECT` em `tipo_operacao` e `operador`; `INSERT` e `UPDATE (fim)` em `operacao`; `USAGE` em `operacao_id_seq`). Não rode de novo `sql/criar_role_mqtt_injector.sql`, porque ele redefine a senha da role.
+3. `git pull` e `docker compose up -d --build` na EC2 (o `Dockerfile` agora copia também `sincronizar_operacao.py`).
+
 ---
 
 ## 3. Configuração dos sensores
@@ -109,7 +125,9 @@ Software na EC2: Docker 25.0.14 e Docker Compose v2.29.7. Código em `/home/ec2-
 - `<ecode>`: código livre da fazenda/cliente (ex.: `japungu`). Não é gravado no banco.
 - `<maquina.id>`: **inteiro**, igual ao `id` da tabela `maquina` no `irrigacao_db`. Exemplo: `japungu/telemetria/2`.
 
-Antes de instalar um sensor, a máquina correspondente precisa estar cadastrada em `maquina`. Para conferir o id:
+O tópico é o plano B: a máquina é resolvida primeiro pelo `dev_id` do payload. O tópico `teste/telemetria/2` é o equipamento vinculado à Gotejo_69.
+
+Antes de instalar um sensor, a máquina correspondente precisa estar cadastrada em `maquina` (com o `dev_id` do chip). Para conferir o id:
 
 ```sql
 SELECT m.id, m.nome, m.nome_casa_bomba, p.nome AS projeto
@@ -139,11 +157,17 @@ FROM maquina m JOIN projeto p ON p.id = m.id_projeto;
 | `ch_1`…`ch_9` | booleano | Comando hidráulico do setor N |
 | `calibracao_sensor` | objeto (opcional) | Ganho/offset atuais, gravado como `jsonb` |
 | `leitura_campo` | booleano (opcional) | `true` = leitura manual (a API ignora). Padrão `false` |
+| `dev_id` | inteiro | Id do chip; resolve a máquina por `maquina.dev_id` (migration 007). Sem ele, ou se não cadastrado, vale o id do tópico |
+| `id_operacao` | inteiro | Código da **atividade** = `tipo_operacao.codigo_cadastro_servidor` (não é o id da tabela `operacao`) |
+| `id_parada` | inteiro | Código da **parada** = `tipo_operacao.codigo_cadastro_servidor`; se não for `null`, vale no lugar de `id_operacao` |
+| `operador` | inteiro | `operador.codigo_cadastro_servidor` (nunca `operador.codigo`) |
+
+Os demais campos do firmware (`msg_num`, `estado`, `evento`, `eq_id`, `sinal`, `bateria`, `fw`...) ainda não são gravados.
 
 **Regras importantes:**
 - Sensor sem leitura → **omitir o campo** ou mandar `null`. Nunca mandar `0` no lugar, porque o zero é tratado como valor real.
-- Leituras guardadas no SD durante falta de rede devem ser reenviadas com o `timestamp` original. O injector associa cada uma à operação que estava aberta naquele instante.
-- **A máquina precisa ter uma operação aberta** (`operacao.fim IS NULL`) no horário da leitura. Caso contrário, a leitura é descartada. A abertura/fechamento de operações é feita pela API/operador, não pelo sensor.
+- Leituras guardadas no SD durante falta de rede devem ser reenviadas com o `timestamp` original. Se forem anteriores ao início da operação aberta, o injector **não troca** a operação: associa cada uma à operação que estava vigente naquele instante (ou descarta, se não houver).
+- **O injector abre e fecha as operações** (a partir da atualização descrita em 2.6): quando o tipo (`id_parada`/`id_operacao`) ou o `operador` da leitura muda, ele fecha a operação aberta (`fim` = instante da leitura) e abre outra. Uma leitura só é descartada se for antiga e não houver operação vigente naquele instante.
 - Após cada leitura gravada, a API recebe um `pg_notify` e atualiza o painel em tempo real. Uma máquina fica `sem_sinal` se passar mais de 15 min sem leitura.
 
 ### 3.4 Teste rápido a partir de um computador liberado no SG
@@ -166,7 +190,7 @@ mosquitto_pub -h <ELASTIC_IP> -p 1883 -u <usuario> -P '<senha>' -q 1 \
      --ip-permissions 'IpProtocol=tcp,FromPort=1883,ToPort=1883,IpRanges=[{CidrIp=<IP_DO_SENSOR>/32,Description="sensor <nome>"}]'
    ```
    Se os sensores usam rede móvel com IP dinâmico, a liberação por IP não funciona. Nesse caso, ver item 4.2.
-2. **Conferir o mapeamento** sensor → `maquina.id` e garantir que cada máquina tem operação aberta quando for irrigar.
+2. **Conferir o mapeamento** sensor → máquina (`maquina.dev_id`, ou `maquina.id` no tópico) e os códigos de tipo/operador no cadastro do servidor. Não é mais preciso abrir a operação antes: o injector a abre na primeira leitura.
 
 ### 4.2 Recomendado (segurança)
 3. **TLS no MQTT (porta 8883)**: hoje usuário, senha e dados trafegam em texto claro. Configurar certificado no Mosquitto (ex.: Let's Encrypt com um domínio apontando para o Elastic IP), liberar 8883 e fechar 1883. Com TLS fica aceitável abrir a porta para `0.0.0.0/0`, o que resolve o caso de IP dinâmico.
@@ -176,7 +200,7 @@ mosquitto_pub -h <ELASTIC_IP> -p 1883 -u <usuario> -P '<senha>' -q 1 \
 
 ### 4.3 Operação
 5. **Monitoramento**: alarme no CloudWatch para status check da EC2 e, se possível, para "nenhuma telemetria nova em X minutos".
-6. **Leituras descartadas** ficam só no log (`docker compose logs injector | grep "Nenhuma operação"`). Se for preciso não perder nenhuma, considerar uma tabela de quarentena (exige alteração de schema e permissão).
+6. **Leituras descartadas** (antigas, sem operação vigente) ficam só no log (`docker compose logs injector | grep "Nenhuma operação"`). Se for preciso não perder nenhuma, considerar uma tabela de quarentena (exige alteração de schema e permissão).
 7. **Fuso/relógio do ESP32**: garantir NTP no firmware para o `timestamp` ser confiável.
 
 ---
