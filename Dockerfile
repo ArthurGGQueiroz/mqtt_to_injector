@@ -10,7 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o código para dentro do container
-COPY main.py .
+COPY main.py sincronizar_operacao.py .
 
 # Executa o script
 CMD ["python", "main.py"]

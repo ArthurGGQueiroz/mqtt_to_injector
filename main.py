@@ -4,7 +4,10 @@ import time
 import logging
 import paho.mqtt.client as mqtt
 import psycopg2
+from psycopg2 import errors as pg_errors
 from psycopg2.extras import Json
+
+import sincronizar_operacao as sync
 
 # Configuração de Logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,17 +26,8 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
-# Operação aberta da máquina no instante da leitura (timestamp em ms ou NOW())
-SQL_OPERACAO = """
-    SELECT id FROM operacao
-    WHERE id_maquina = %s
-      AND inicio <= COALESCE(to_timestamp(%s / 1000.0), NOW())
-      AND (fim IS NULL OR fim >= COALESCE(to_timestamp(%s / 1000.0), NOW()))
-    ORDER BY inicio DESC
-    LIMIT 1
-"""
-
-# O id da telemetria é gerado pelo banco (BIGSERIAL)
+# O id da telemetria é gerado pelo banco (BIGSERIAL).
+# data_hora recebe o mesmo instante usado para sincronizar a operação.
 SQL_INSERT = """
     INSERT INTO telemetria (
         id_operacao, data_hora, paf, pdf, pav, pdv, vazao, horimetro,
@@ -41,7 +35,7 @@ SQL_INSERT = """
         ch_1, ch_2, ch_3, ch_4, ch_5, ch_6, ch_7, ch_8, ch_9,
         calibracao_sensor, leitura_campo
     ) VALUES (
-        %s, COALESCE(to_timestamp(%s / 1000.0), NOW()), %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s
@@ -78,11 +72,15 @@ def reset_db_connection():
             pass
     db_conn = None
 
-# Resolve a operação e grava a leitura. Retorna o id_operacao usado ou None se não há operação.
-def gravar_telemetria(id_maquina, timestamp, valores):
+# Resolve a máquina, sincroniza a operação (troca de tipo/operador) e grava a leitura,
+# tudo numa transação só. Retorna (id_maquina, origem, id_operacao); id_operacao é None
+# se não há operação para a leitura (ela é descartada).
+def gravar_telemetria(id_topico, dev_id, codigo_tipo, codigo_operador, instante, valores):
     global db_conn
-    # Tenta no máximo duas vezes: a segunda só se a conexão tiver caído
-    for tentativa in range(2):
+    # Repete no máximo uma vez por motivo: conexão caída ou conflito no índice de operação aberta
+    reconectou = False
+    reabriu = False
+    while True:
         if db_conn is None or db_conn.closed:
             db_conn = get_db_connection()
             if db_conn is None:
@@ -90,21 +88,36 @@ def gravar_telemetria(id_maquina, timestamp, valores):
 
         cursor = db_conn.cursor()
         try:
-            cursor.execute(SQL_OPERACAO, (id_maquina, timestamp, timestamp))
-            row = cursor.fetchone()
-            if row is None:
-                db_conn.rollback()
-                return None
+            id_maquina, origem = sync.resolver_maquina(cursor, dev_id, id_topico)
+            id_tipo_operacao = sync.resolver_tipo_operacao(cursor, codigo_tipo)
+            id_operador = sync.resolver_operador(cursor, codigo_operador)
+            descricao = f"(códigos: tipo {codigo_tipo}, operador {codigo_operador})"
 
-            id_operacao = row[0]
-            cursor.execute(SQL_INSERT, (id_operacao, timestamp) + valores)
+            id_operacao = sync.sincronizar_operacao(
+                cursor, id_maquina, id_tipo_operacao, id_operador, instante, descricao
+            )
+            if id_operacao is None:
+                db_conn.rollback()
+                return id_maquina, origem, None
+
+            cursor.execute(SQL_INSERT, (id_operacao, instante) + valores)
             db_conn.commit()
-            return id_operacao
+            return id_maquina, origem, id_operacao
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
             # Conexão perdida (RDS reiniciou, timeout de rede...): reconecta e tenta de novo
             reset_db_connection()
-            if tentativa == 0:
+            if not reconectou:
+                reconectou = True
                 logging.warning(f"Conexão com o RDS perdida ({e}), reconectando...")
+                continue
+            raise
+        except pg_errors.UniqueViolation as e:
+            # Duas mensagens abriram operação ao mesmo tempo (uq_operacao_aberta_por_maquina):
+            # desfaz e repete, já enxergando a operação que o outro lado abriu
+            db_conn.rollback()
+            if not reabriu:
+                reabriu = True
+                logging.warning(f"Conflito ao abrir operação ({e}), repetindo a leitura...")
                 continue
             raise
         except Exception:
@@ -131,12 +144,13 @@ def on_connect(client, userdata, flags, reason_code, properties):
 # Callback executado quando uma nova mensagem chega de um sensor
 def on_message(client, userdata, msg):
     try:
-        # Extração do ID da máquina (maquina.id) a partir do tópico MQTT (ex: japungu/telemetria/3211)
+        # ID da máquina (maquina.id) do tópico MQTT (ex: japungu/telemetria/3211).
+        # É o plano B: a máquina vem de preferência do dev_id do payload.
         topico_partes = msg.topic.split('/')
-        id_maquina = int(topico_partes[-1])
+        id_topico = int(topico_partes[-1])
 
         payload_str = msg.payload.decode('utf-8')
-        logging.info(f"Mensagem recebida no tópico [{msg.topic}] (máquina: {id_maquina}): {payload_str}")
+        logging.info(f"Mensagem recebida no tópico [{msg.topic}] (máquina do tópico: {id_topico}): {payload_str}")
 
         data = json.loads(payload_str)
 
@@ -180,10 +194,15 @@ def on_message(client, userdata, msg):
 
         # Hora da leitura (ms desde epoch). O firmware guarda as mensagens no SD quando
         # está sem rede, então NOW() daria a hora de chegada. Antes de sincronizar o
-        # relógio o ESP32 manda ~1970: nesse caso cai no NOW().
-        timestamp = data.get("timestamp")
-        if not isinstance(timestamp, (int, float)) or timestamp < 1577836800000:  # 2020-01-01
-            timestamp = None
+        # relógio o ESP32 manda ~1970: nesse caso cai no horário do servidor (com WARNING).
+        instante, _ = sync.resolver_instante(data.get("timestamp"))
+
+        # Identificação da máquina e da operação. id_parada (improdutiva) tem prioridade sobre
+        # id_operacao (produtiva); ambos e o operador são códigos do cadastro do servidor.
+        # estado, evento, apontamento_manual etc. não são usados.
+        dev_id = data.get("dev_id")
+        codigo_tipo = sync.escolher_codigo_tipo(data.get("id_parada"), data.get("id_operacao"))
+        codigo_operador = data.get("operador")
 
         valores = (
             paf, pdf, pav, pdv, vazao, horimetro,
@@ -192,17 +211,15 @@ def on_message(client, userdata, msg):
             calibracao_sensor, leitura_campo
         )
 
-        # Inserção no RDS (a operação é resolvida pelo banco, não pelo payload)
-        id_operacao = gravar_telemetria(id_maquina, timestamp, valores)
+        # Inserção no RDS (máquina e operação são resolvidas/sincronizadas pelo injetor)
+        id_maquina, origem, id_operacao = gravar_telemetria(
+            id_topico, dev_id, codigo_tipo, codigo_operador, instante, valores
+        )
         if id_operacao is None:
-            logging.warning(f"Nenhuma operação aberta para a máquina {id_maquina}: leitura foi descartada por não haver operação.")
+            logging.warning(f"Nenhuma operação para a máquina {id_maquina} (via {origem}) em {instante.isoformat()}: leitura foi descartada por não haver operação.")
             return
 
-        id_operacao_payload = data.get("id_operacao")
-        if id_operacao_payload is not None and id_operacao_payload != id_operacao:
-            logging.debug(f"id_operacao do payload ({id_operacao_payload}) ignorado; usando {id_operacao}")
-
-        logging.info(f"Dados de telemetria inseridos no RDS com sucesso! (máquina: {id_maquina}, operação: {id_operacao})")
+        logging.info(f"Dados de telemetria inseridos no RDS com sucesso! (máquina: {id_maquina} via {origem}, operação: {id_operacao})")
 
     # JSONDecodeError é subclasse de ValueError: precisa vir antes
     except json.JSONDecodeError:

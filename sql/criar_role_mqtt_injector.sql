@@ -3,7 +3,10 @@
 -- Banco: irrigacao_db (AWS RDS PostgreSQL 17)
 --
 -- O injector só precisa:
---   * ler operacao/maquina (resolver a operação aberta do equipamento);
+--   * ler maquina (resolver a máquina pelo dev_id do chip);
+--   * ler tipo_operacao/operador (traduzir os códigos do payload, que são
+--     codigo_cadastro_servidor);
+--   * abrir e fechar operacao quando o tipo ou o operador da leitura muda;
 --   * inserir linhas em telemetria.
 --
 -- Script idempotente: pode ser executado várias vezes sem erro.
@@ -34,8 +37,15 @@ ALTER ROLE mqtt_injector WITH LOGIN PASSWORD :'senha';
 GRANT CONNECT ON DATABASE irrigacao_db TO mqtt_injector;
 GRANT USAGE ON SCHEMA public TO mqtt_injector;
 
--- 4) Leitura apenas das tabelas necessárias para resolver a operação
-GRANT SELECT ON TABLE public.operacao, public.maquina TO mqtt_injector;
+-- 4) Leitura apenas das tabelas necessárias para resolver máquina, tipo, operador e operação
+GRANT SELECT ON TABLE public.operacao, public.maquina, public.tipo_operacao, public.operador TO mqtt_injector;
+
+-- 4.1) Troca de operação: o injetor insere a operação nova e fecha a anterior
+--      (só a coluna fim pode ser alterada; INSERT ... RETURNING id usa o SELECT acima).
+--      Requer as migrations 006 (codigo_cadastro_servidor) e 007 (maquina.dev_id) do RigTech_APIs.
+GRANT INSERT ON TABLE public.operacao TO mqtt_injector;
+GRANT UPDATE (fim) ON TABLE public.operacao TO mqtt_injector;
+GRANT USAGE ON SEQUENCE public.operacao_id_seq TO mqtt_injector;
 
 -- 5) Inserção de telemetria (sem UPDATE/DELETE/SELECT)
 GRANT INSERT ON TABLE public.telemetria TO mqtt_injector;
