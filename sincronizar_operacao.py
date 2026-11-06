@@ -116,7 +116,11 @@ def resolver_instante(timestamp_ms, agora=None):
             or not timestamp_ms >= TIMESTAMP_MINIMO_MS:
         logging.warning(f"timestamp ausente ou inválido no payload ({timestamp_ms!r}): usando o horário do servidor.")
         return agora, False
-    adiantado_s = timestamp_ms / 1000.0 - agora.timestamp()
+    try:
+        adiantado_s = timestamp_ms / 1000.0 - agora.timestamp()
+    except OverflowError:
+        # inteiro gigante no JSON (ex.: 10**400): trata como futuro
+        adiantado_s = float("inf")
     if adiantado_s > 0:
         if adiantado_s > TOLERANCIA_FUTURO_SEGUNDOS:
             logging.warning(f"timestamp no futuro no payload ({timestamp_ms!r}, {adiantado_s:.0f} s adiantado): usando o horário do servidor.")
