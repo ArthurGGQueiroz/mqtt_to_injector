@@ -47,6 +47,12 @@ SQL_OPERACAO_VIGENTE = """
 # Antes de 2020 o relógio do ESP32 ainda não sincronizou (manda ~1970)
 TIMESTAMP_MINIMO_MS = 1577836800000  # 2020-01-01
 
+# Relógio do ESP32 adiantado: até isso é desvio normal (usa o servidor sem WARNING)
+TOLERANCIA_FUTURO_SEGUNDOS = 60
+
+# Maior valor do BIGINT do Postgres (maquina.dev_id); acima disso a consulta falha
+BIGINT_MAXIMO = 9223372036854775807
+
 # Quanto tempo o cadastro (tipo/operador) fica em memória antes de consultar o banco de novo
 CADASTRO_TTL_SEGUNDOS = 300
 
@@ -76,27 +82,46 @@ class CacheCadastro:
 
 cache_cadastro = CacheCadastro()
 
+# True quando a migration 007 não está aplicada (sem maquina.dev_id ou sem os grants):
+# o main.py volta à regra antiga (máquina do tópico, operação vigente, sem troca)
+modo_legado = False
+
 
 # Resolve a máquina da mensagem. Retorna (id_maquina, origem) com origem "dev_id" ou "tópico".
 # dev_id não cadastrado (ou ausente) cai no id do tópico, como era antes.
 def resolver_maquina(cursor, dev_id, id_topico):
-    if isinstance(dev_id, int) and not isinstance(dev_id, bool):
-        cursor.execute(SQL_MAQUINA_POR_DEV_ID, (dev_id,))
-        row = cursor.fetchone()
-        if row is not None:
-            return row[0], "dev_id"
-        logging.warning(f"dev_id {dev_id} não está cadastrado em maquina.dev_id: usando a máquina do tópico ({id_topico}).")
+    if dev_id is None:
+        return id_topico, "tópico"
+    if isinstance(dev_id, float) and dev_id.is_integer():
+        dev_id = int(dev_id)
+    elif isinstance(dev_id, str) and dev_id.strip().isdigit():
+        dev_id = int(dev_id.strip())
+    if not isinstance(dev_id, int) or isinstance(dev_id, bool) or not 0 < dev_id <= BIGINT_MAXIMO:
+        logging.warning(f"dev_id inválido no payload ({dev_id!r}): usando a máquina do tópico ({id_topico}).")
+        return id_topico, "tópico"
+    cursor.execute(SQL_MAQUINA_POR_DEV_ID, (dev_id,))
+    row = cursor.fetchone()
+    if row is not None:
+        return row[0], "dev_id"
+    logging.warning(f"dev_id {dev_id} não está cadastrado em maquina.dev_id: usando a máquina do tópico ({id_topico}).")
     return id_topico, "tópico"
 
 
 # Instante da leitura como datetime UTC. Retorna (instante, veio_do_payload).
-# Sem timestamp válido usa o horário do servidor.
+# Sem timestamp válido, ou com timestamp no futuro (abriria operação com inicio > agora,
+# que a API não mostra como atual), usa o horário do servidor.
 def resolver_instante(timestamp_ms, agora=None):
-    if isinstance(timestamp_ms, (int, float)) and not isinstance(timestamp_ms, bool) \
-            and timestamp_ms >= TIMESTAMP_MINIMO_MS:
-        return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc), True
-    logging.warning(f"timestamp ausente ou inválido no payload ({timestamp_ms!r}): usando o horário do servidor.")
-    return (agora or datetime.now(timezone.utc)), False
+    agora = agora or datetime.now(timezone.utc)
+    if not isinstance(timestamp_ms, (int, float)) or isinstance(timestamp_ms, bool) \
+            or not timestamp_ms >= TIMESTAMP_MINIMO_MS:
+        logging.warning(f"timestamp ausente ou inválido no payload ({timestamp_ms!r}): usando o horário do servidor.")
+        return agora, False
+    adiantado_s = timestamp_ms / 1000.0 - agora.timestamp()
+    if adiantado_s > 0:
+        if adiantado_s > TOLERANCIA_FUTURO_SEGUNDOS:
+            logging.warning(f"timestamp no futuro no payload ({timestamp_ms!r}, {adiantado_s:.0f} s adiantado): usando o horário do servidor.")
+        return agora, False
+    return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc), True
 
 
 # Código do tipo: a parada (improdutiva) tem prioridade sobre a atividade (produtiva)

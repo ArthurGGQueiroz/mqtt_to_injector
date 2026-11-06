@@ -94,7 +94,7 @@ A afirmação da seção 3.3 da versão anterior, de que a abertura e o fechamen
 
 Para implantar:
 1. Aplicar as migrations **006** (`codigo_cadastro_servidor`) e **007** (`maquina.dev_id`, com o chip 215876883829000 na Gotejo_69) do `RigTech_APIs`.
-2. Rodar de novo `sql/criar_role_mqtt_injector.sql` (novos grants: `SELECT` em `tipo_operacao` e `operador`; `INSERT` e `UPDATE (fim)` em `operacao`; `USAGE` em `operacao_id_seq`).
+2. Nada a rodar para a role: a própria 007 concede os grants novos (`SELECT` em `tipo_operacao` e `operador`; `INSERT` e `UPDATE (fim)` em `operacao`; `USAGE` em `operacao_id_seq`). Não rode de novo `sql/criar_role_mqtt_injector.sql`, porque ele redefine a senha da role.
 3. `git pull` e `docker compose up -d --build` na EC2 (o `Dockerfile` agora copia também `sincronizar_operacao.py`).
 
 ---

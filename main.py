@@ -88,14 +88,18 @@ def gravar_telemetria(id_topico, dev_id, codigo_tipo, codigo_operador, instante,
 
         cursor = db_conn.cursor()
         try:
-            id_maquina, origem = sync.resolver_maquina(cursor, dev_id, id_topico)
-            id_tipo_operacao = sync.resolver_tipo_operacao(cursor, codigo_tipo)
-            id_operador = sync.resolver_operador(cursor, codigo_operador)
-            descricao = f"(códigos: tipo {codigo_tipo}, operador {codigo_operador})"
+            if sync.modo_legado:
+                id_maquina, origem = id_topico, "tópico"
+                id_operacao = sync.buscar_operacao_vigente(cursor, id_maquina, instante)
+            else:
+                id_maquina, origem = sync.resolver_maquina(cursor, dev_id, id_topico)
+                id_tipo_operacao = sync.resolver_tipo_operacao(cursor, codigo_tipo)
+                id_operador = sync.resolver_operador(cursor, codigo_operador)
+                descricao = f"(códigos: tipo {codigo_tipo}, operador {codigo_operador})"
 
-            id_operacao = sync.sincronizar_operacao(
-                cursor, id_maquina, id_tipo_operacao, id_operador, instante, descricao
-            )
+                id_operacao = sync.sincronizar_operacao(
+                    cursor, id_maquina, id_tipo_operacao, id_operador, instante, descricao
+                )
             if id_operacao is None:
                 db_conn.rollback()
                 return id_maquina, origem, None
@@ -118,6 +122,15 @@ def gravar_telemetria(id_topico, dev_id, codigo_tipo, codigo_operador, instante,
             if not reabriu:
                 reabriu = True
                 logging.warning(f"Conflito ao abrir operação ({e}), repetindo a leitura...")
+                continue
+            raise
+        except (pg_errors.UndefinedColumn, pg_errors.InsufficientPrivilege) as e:
+            # Migration 007 não aplicada (sem maquina.dev_id ou sem os grants novos):
+            # volta à regra antiga até o injetor ser reiniciado depois da 007
+            db_conn.rollback()
+            if not sync.modo_legado:
+                sync.modo_legado = True
+                logging.error(f"Migration 007 não aplicada ({e}): usando a regra antiga (máquina do tópico, sem troca de operação) até reiniciar o injetor.")
                 continue
             raise
         except Exception:

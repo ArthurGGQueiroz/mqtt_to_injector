@@ -43,11 +43,13 @@ Os demais campos do firmware (`msg_num`, `estado`, `evento`, `evento_codigo`, `e
 4. Há operação aberta, `ts >= inicio` e o `(tipo, operador)` mudou → fecha a atual (`fim = ts`) e abre outra (`inicio = ts`), com `INFO` de troca no log (códigos de origem incluídos).
 5. Não há operação aberta: se `ts` é maior ou igual ao maior `fim` da máquina (ou ela não tem operação), abre uma nova em `ts`; se for anterior (leitura antiga), usa a operação vigente em `ts` ou descarta.
 
+Código recém-cadastrado em `tipo_operacao` ou `operador` leva até 5 minutos (TTL do cache) para valer. Se o payload alternar entre `null` e um valor em tipo ou operador, cada alternância troca a operação; acompanhe com `grep "Troca de operação"` no primeiro dia.
+
 A leitura é inserida em `telemetria` com o `id` da operação resolvida ou criada (o `id` da telemetria é gerado pelo banco). Se duas mensagens tentarem abrir operação ao mesmo tempo (índice único `uq_operacao_aberta_por_maquina`), a transação é desfeita e repetida uma vez.
 
 > :warning: Leituras antigas (anteriores ao `inicio` da operação aberta ou ao `fim` da última) para as quais **não existe operação vigente** no instante são **descartadas** (não são gravadas) e aparece um `WARNING` no log.
 
-> :warning: **Dependências no `RigTech_APIs`:** a migration **006** (`codigo_cadastro_servidor` em `tipo_operacao` e `operador`) e a **007** (`maquina.dev_id`) precisam estar aplicadas, e a role precisa dos novos grants de `sql/criar_role_mqtt_injector.sql`. Sem a 007 toda leitura com `dev_id` falha na consulta.
+> :warning: **Dependências no `RigTech_APIs`:** a migration **006** (`codigo_cadastro_servidor` em `tipo_operacao` e `operador`) e a **007** (`maquina.dev_id`) precisam estar aplicadas, e a role precisa dos novos grants de `sql/criar_role_mqtt_injector.sql`. Sem a 007 o injetor loga ERROR e volta à regra antiga (máquina do tópico, sem troca de operação) até ser reiniciado.
 
 ---
 
@@ -209,6 +211,6 @@ Deve aparecer `Mensagem recebida no tópico [teste/telemetria/2] (máquina do t�
 - **`dev_id ... não está cadastrado em maquina.dev_id`**: o chip não está vinculado a nenhuma máquina; a leitura foi para a máquina do tópico. Cadastre o `dev_id` (migration 007).
 - **`operador: código ... não existe em codigo_cadastro_servidor`** (ou `tipo_operacao`): o código do payload não está no cadastro do servidor; a operação é gravada sem operador/tipo (aparece como parada).
 - **`column "dev_id" does not exist`** ou **`column "codigo_cadastro_servidor" does not exist`**: faltam as migrations 007 / 006 do `RigTech_APIs`.
-- **`permission denied for table ...`**: a role `mqtt_injector` está sem permissão; rode novamente `sql/criar_role_mqtt_injector.sql`.
+- **`permission denied for table ...`**: a role `mqtt_injector` está sem permissão; aplique a migration 007 do RigTech_APIs (ou o script de role, com a **mesma** senha do `.env`).
 - **`Erro ao extrair o ID do tópico MQTT`**: o último segmento do tópico não é um número (`maquina.id`).
 - **`mqtt_broker` reiniciando sem parar**: falta o arquivo `mosquitto/config/passwd` (passo 4). Veja com `docker compose logs mosquitto`.

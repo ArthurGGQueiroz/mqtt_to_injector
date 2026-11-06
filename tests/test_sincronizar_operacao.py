@@ -131,6 +131,25 @@ def test_maquina_sem_dev_id_usa_topico_sem_consultar_nem_avisar():
 
 # ---------------------------------------------------------------- tipo e operador
 
+def test_maquina_dev_id_float_inteiro_e_string_numerica_sao_aceitos():
+    cur = CursorFalso(maquinas={215876883829000: 10})
+    assert sync.resolver_maquina(cur, 215876883829000.0, 2) == (10, "dev_id")
+    assert sync.resolver_maquina(cur, " 215876883829000 ", 2) == (10, "dev_id")
+    assert sync.resolver_maquina(cur, "215876883829000", 2) == (10, "dev_id")
+
+
+def test_maquina_dev_id_invalido_usa_topico_com_warning_sem_consultar():
+    cur = CursorFalso(maquinas={1: 10, 0: 11, -5: 12})
+    for invalido in (True, -5, 0, sync.BIGINT_MAXIMO + 1, "abc", 1.5, [1]):
+        logs = capturar_logs()
+        try:
+            assert sync.resolver_maquina(cur, invalido, 2) == (2, "tópico")
+        finally:
+            soltar_logs(logs)
+        assert logs.mensagens, invalido
+    assert cur.consultas == []
+
+
 def test_tipo_prefere_id_parada_sobre_id_operacao():
     assert sync.escolher_codigo_tipo(7, 285) == 7
     assert sync.escolher_codigo_tipo(None, 285) == 285
@@ -191,7 +210,7 @@ def test_cache_evita_nova_consulta_inclusive_para_desconhecido_e_expira():
 # ---------------------------------------------------------------- instante
 
 def test_instante_do_payload_e_fallback_para_servidor_com_warning():
-    ts, do_payload = sync.resolver_instante(1793938758000)
+    ts, do_payload = sync.resolver_instante(1793938758000, datetime.fromtimestamp(1793938758 + 86400, tz=timezone.utc))
     assert do_payload and ts == datetime.fromtimestamp(1793938758, tz=timezone.utc)
     agora = em(0)
     logs = capturar_logs()
@@ -201,6 +220,38 @@ def test_instante_do_payload_e_fallback_para_servidor_com_warning():
         soltar_logs(logs)
     assert not do_payload and ts == agora and logs.mensagens
     assert sync.resolver_instante(None, agora)[0] == agora
+
+
+def test_instante_no_futuro_usa_servidor_com_warning():
+    agora = em(0)
+    futuro_ms = int(agora.timestamp() * 1000) + 30 * 86400 * 1000
+    logs = capturar_logs()
+    try:
+        assert sync.resolver_instante(futuro_ms, agora) == (agora, False)
+    finally:
+        soltar_logs(logs)
+    assert any("futuro" in m for m in logs.mensagens)
+
+
+def test_instante_infinito_e_nan_usam_servidor():
+    agora = em(0)
+    logs = capturar_logs()
+    try:
+        assert sync.resolver_instante(float("inf"), agora) == (agora, False)
+        assert sync.resolver_instante(float("nan"), agora) == (agora, False)
+    finally:
+        soltar_logs(logs)
+
+
+def test_instante_levemente_adiantado_usa_servidor_sem_warning():
+    agora = em(0)
+    adiantado_ms = int(agora.timestamp() * 1000) + 30 * 1000
+    logs = capturar_logs()
+    try:
+        assert sync.resolver_instante(adiantado_ms, agora) == (agora, False)
+    finally:
+        soltar_logs(logs)
+    assert logs.mensagens == []
 
 
 # ---------------------------------------------------------------- sincronização
